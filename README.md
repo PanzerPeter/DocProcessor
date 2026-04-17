@@ -6,27 +6,35 @@ A lightweight, three-stage pipeline for extracting and categorizing documents (P
 Input (PDF / Image)
       │
       ▼
- [ Extractor ]        ← PyMuPDF + Tesseract
+ [ Extractor ]        ← PyMuPDF + Tesseract OCR
       │
       ▼
- [ AI Categorizer ]   ← Claude API
+ [ AI Categorizer ]   ← Claude API + Pydantic validation
       │
       ▼
- [ JSON Output ]
+ [ JSON / JSONL / CSV Output ]
 ```
 
 ## Features
 
-- Native PDF text extraction via PyMuPDF
-- Automatic OCR fallback for scanned pages via Tesseract
-- Direct image input (PNG, JPG, TIFF, BMP, WebP)
-- AI categorization and key-field extraction via Claude API
-- Bilingual support: English + Hungarian (`eng+hun`)
-- Structured JSON output — pipe into databases, scripts, or APIs
+- Native PDF text extraction via PyMuPDF — 10× faster than PyPDF2
+- Automatic OCR fallback for scanned pages (per-page detection)
+- Direct image input: PNG, JPG, TIFF, BMP, WebP
+- AI categorization and structured key-field extraction via Claude API
+- Pydantic-validated output schema — no silent data corruption
+- Exponential-backoff retry on API failures
+- Batch processing: files, globs, entire directories
+- Output formats: JSON, JSONL, CSV
+- Per-file output directory mode
+- Confidence threshold filtering (`--min-confidence`)
+- Rich progress bar and summary table
+- Fully configurable via environment variables
+- Bilingual OCR: English + Hungarian (`eng+hun`)
 
 ## Requirements
 
 - Python ≥ 3.11
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed system-wide
 - Anthropic API key
 
@@ -42,29 +50,19 @@ sudo apt install tesseract-ocr tesseract-ocr-hun
 brew install tesseract tesseract-lang
 ```
 
-**Windows:** Download installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki).
+**Windows:** Download from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki).
 
 ## Installation
-
-### Using uv (recommended)
 
 ```bash
 git clone https://github.com/youruser/doc-processor.git
 cd doc-processor
 uv venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
-uv pip install -r requirements.txt
-```
-
-### Using pip
-
-```bash
-pip install -r requirements.txt
+uv pip install -e .
 ```
 
 ## Configuration
-
-Copy `.env.example` to `.env` and set your API key:
 
 ```bash
 cp .env.example .env
@@ -74,15 +72,38 @@ cp .env.example .env
 ANTHROPIC_API_KEY=your_api_key_here
 ```
 
-The `anthropic` library reads `ANTHROPIC_API_KEY` from the environment automatically.
+Additional environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | — | **Required.** Anthropic API key |
+| `DOC_MODEL` | `claude-sonnet-4-6` | Claude model to use |
+| `DOC_MAX_INPUT_CHARS` | `8000` | Max chars sent to Claude |
+| `DOC_OCR_LANGS` | `eng+hun` | Tesseract language string |
+| `DOC_MIN_CONFIDENCE` | `0.0` | Global confidence threshold |
+| `DOC_API_RETRIES` | `3` | API retry attempts |
+| `LOG_LEVEL` | `WARNING` | Python log level |
 
 ## Usage
 
 ```bash
-cd doc_processor
-python main.py path/to/document.pdf
-python main.py path/to/scan.png
-python main.py invoice.pdf --output result.json
+# Single file → stdout
+doc-processor invoice.pdf
+
+# Image file
+doc-processor scan.png
+
+# Batch — all PDFs in a directory
+doc-processor docs/ --output-dir results/
+
+# Multiple files, JSONL output
+doc-processor *.pdf --format jsonl --output results.jsonl
+
+# CSV export, skip low-confidence results
+doc-processor docs/ --format csv --min-confidence 0.75 --output summary.csv
+
+# Debug logging
+doc-processor invoice.pdf --verbose
 ```
 
 ### Example Output
@@ -99,7 +120,9 @@ python main.py invoice.pdf --output result.json
     "vendor": "Példa Kft."
   },
   "confidence": 0.94,
-  "source_file": "szamla_marc.pdf"
+  "source_file": "szamla_marc.pdf",
+  "page_count": 2,
+  "char_count": 3471
 }
 ```
 
@@ -117,12 +140,34 @@ python main.py invoice.pdf --output result.json
 
 ```
 doc_processor/
-├── main.py           # CLI entry point, orchestrates the pipeline
+├── main.py           # CLI entry point, batch orchestrator
 ├── extractor.py      # Text extraction (PyMuPDF + Tesseract)
-├── categorizer.py    # AI structuring via Claude API
-└── utils.py          # File validation and helpers
-pyproject.toml        # Project metadata and dependencies
-requirements.txt      # Pinned dependencies
+├── categorizer.py    # Claude API call, retry logic
+├── models.py         # Pydantic output schema
+├── exceptions.py     # Custom exception hierarchy
+├── config.py         # Config dataclass, env var loading
+└── utils.py          # File validation, directory collection
+tests/
+├── conftest.py
+├── test_models.py    # Pydantic validation tests
+├── test_utils.py     # File helper tests
+├── test_categorizer.py  # Live API tests (requires API key)
+└── fixtures/         # Put test PDFs/images here
+pyproject.toml
+requirements.txt
+```
+
+## Running Tests
+
+```bash
+# Fast tests (no API key needed)
+pytest tests/test_models.py tests/test_utils.py
+
+# All tests including live API calls
+ANTHROPIC_API_KEY=your_key pytest
+
+# With coverage
+pytest --cov=doc_processor
 ```
 
 ## Design Decisions
@@ -131,13 +176,19 @@ requirements.txt      # Pinned dependencies
 |----------|--------|
 | PyMuPDF over PyPDF2 | 10× faster, handles scanned PDFs and multi-column layouts natively |
 | Claude API for categorization | No custom ML model to train or maintain |
+| Pydantic output validation | Catches malformed API responses before they corrupt downstream data |
+| Exponential backoff on retries | Handles transient API rate limits gracefully |
 | 8000-char input guard | Prevents token overflow on large documents |
 | `lang="eng+hun"` | Covers both English and Hungarian documents |
-| Single JSON schema | Predictable output, easy to pipe into databases |
+| `rich` for CLI output | Progress bar + summary table — no printf debugging |
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md).
 
 ## License
 
